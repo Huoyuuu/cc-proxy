@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Command Code 本地 API</title>
+<script src="https://cdn.tailwindcss.com/3.4.16"></script>
+<script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+<style>
+  body { background: #faf8f3; font-family: ui-sans-serif, system-ui, "Microsoft YaHei", sans-serif; }
+  .card { background: #fffdf8; border: 1px solid #e8e2d5; border-radius: 14px; }
+  .mono { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; }
+</style>
+</head>
+<body class="text-stone-800">
+<div class="max-w-6xl mx-auto px-4 py-6 space-y-5">
+
+  <header class="flex flex-wrap items-center justify-between gap-3">
+    <div class="flex items-center gap-3">
+      <div class="w-10 h-10 rounded-xl bg-stone-800 text-amber-50 grid place-items-center"><i data-lucide="terminal-square"></i></div>
+      <div>
+        <h1 class="text-xl font-semibold">Command Code 本地 API</h1>
+        <p class="text-sm text-stone-500" id="sub">Go 订阅 → OpenAI 兼容接口</p>
+      </div>
+    </div>
+    <div class="flex items-center gap-3 text-sm text-stone-500">
+      <span class="flex items-center gap-1.5"><span id="dot" class="w-2 h-2 rounded-full bg-stone-300"></span><span id="online">连接中…</span></span>
+      <span id="updated"></span>
+      <button onclick="load()" class="card px-3 py-1.5 flex items-center gap-1.5 hover:bg-stone-50"><i data-lucide="refresh-cw" class="w-4 h-4"></i>刷新</button>
+    </div>
+  </header>
+
+  <!-- 接入信息 -->
+  <section class="card p-5">
+    <h2 class="font-semibold flex items-center gap-2 mb-4"><i data-lucide="plug" class="w-4 h-4"></i>接入信息</h2>
+    <div class="grid md:grid-cols-2 gap-3" id="conn"></div>
+    <div class="mt-4">
+      <div class="flex items-center justify-between mb-1.5">
+        <span class="text-sm text-stone-500">交给模型 / 其他程序的配置说明（一键复制）</span>
+        <button class="copy text-sm flex items-center gap-1 text-amber-700 hover:text-amber-900" data-target="prompt"><i data-lucide="copy" class="w-4 h-4"></i>复制</button>
+      </div>
+      <pre id="prompt" class="mono text-xs bg-stone-50 border border-stone-200 rounded-lg p-3 whitespace-pre-wrap"></pre>
+    </div>
+  </section>
+
+  <!-- 额度 -->
+  <section class="grid md:grid-cols-3 gap-4" id="quota"></section>
+
+  <!-- 统计 -->
+  <section class="grid grid-cols-2 md:grid-cols-5 gap-4" id="stats"></section>
+
+  <section class="card p-5">
+    <h2 class="font-semibold flex items-center gap-2 mb-3"><i data-lucide="bar-chart-3" class="w-4 h-4"></i>最近 24 小时 token（每小时）</h2>
+    <div id="chart" class="h-28 flex items-end gap-1"></div>
+    <div class="flex justify-between text-xs text-stone-400 mt-1"><span>24 小时前</span><span>现在</span></div>
+  </section>
+
+  <!-- 调用记录 -->
+  <section class="card p-5">
+    <h2 class="font-semibold flex items-center gap-2 mb-3"><i data-lucide="list" class="w-4 h-4"></i>调用记录（最近 200 条）</h2>
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="text-stone-500 text-left border-b border-stone-200">
+          <tr><th class="py-2 pr-3">时间</th><th class="pr-3">模型</th><th class="pr-3">状态</th><th class="pr-3 text-right">耗时</th><th class="pr-3 text-right">输入</th><th class="pr-3 text-right">缓存命中</th><th class="pr-3 text-right">输出</th><th>备注</th></tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </section>
+</div>
+
+<script>
+const BASE = location.origin + "/v1", KEY = "sk-cc-local";
+const $ = (id) => document.getElementById(id);
+const fmt = (n) => n >= 1e6 ? (n / 1e6).toFixed(2) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "K" : String(n ?? 0);
+const usd = (n) => "$" + (n ?? 0).toFixed(n < 1 ? 4 : 2);
+const left = (ms) => { const s = Math.max(0, ms - Date.now()) / 1000; const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60); return d ? `${d}天${h}小时` : h ? `${h}小时${m}分` : `${m}分`; };
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function copyBox(label, value, id) {
+  return `<div><div class="text-xs text-stone-500 mb-1">${label}</div>
+    <div class="flex items-center gap-2 bg-stone-50 border border-stone-200 rounded-lg px-3 py-2">
+      <code id="${id}" class="mono text-sm flex-1 truncate">${esc(value)}</code>
+      <button class="copy text-stone-400 hover:text-amber-700" data-target="${id}" title="复制"><i data-lucide="copy" class="w-4 h-4"></i></button>
+    </div></div>`;
+}
+
+function meter(title, icon, used, cap, reset, note) {
+  const pct = cap ? Math.min(100, used / cap * 100) : 0;
+  const color = pct > 85 ? "bg-red-500" : pct > 60 ? "bg-amber-500" : "bg-emerald-500";
+  return `<div class="card p-5">
+    <div class="flex items-center justify-between text-sm text-stone-500"><span class="flex items-center gap-2"><i data-lucide="${icon}" class="w-4 h-4"></i>${title}</span><span>${pct.toFixed(1)}%</span></div>
+    <div class="mt-2 text-2xl font-semibold">剩余 ${usd(Math.max(0, cap - used))}</div>
+    <div class="text-sm text-stone-500">已用 ${usd(used)} / 上限 ${usd(cap)}</div>
+    <div class="h-2 rounded-full bg-stone-200 mt-3 overflow-hidden"><div class="h-full ${color}" style="width:${pct}%"></div></div>
+    <div class="text-xs text-stone-400 mt-2">${note || (reset ? "重置于 " + new Date(reset).toLocaleString() + "（" + left(reset) + "后）" : "")}</div>
+  </div>`;
+}
+
+const stat = (label, value, icon, hint = "") => `<div class="card p-4">
+  <div class="text-xs text-stone-500 flex items-center gap-1.5"><i data-lucide="${icon}" class="w-3.5 h-3.5"></i>${label}</div>
+  <div class="text-xl font-semibold mt-1">${value}</div><div class="text-xs text-stone-400">${hint}</div></div>`;
+
+async function load() {
+  let d;
+  try { d = await (await fetch("/api/status")).json(); }
+  catch { $("dot").className = "w-2 h-2 rounded-full bg-red-500"; $("online").textContent = "服务离线"; return; }
+  $("dot").className = "w-2 h-2 rounded-full bg-emerald-500";
+  $("online").textContent = "运行中";
+  $("updated").textContent = "更新于 " + new Date().toLocaleTimeString();
+  const a = d.account || {}, cr = a.credits || {}, w = cr.windowLimits || {}, sub = a.subscription || {}, sm = a.summary || {};
+  $("sub").textContent = `${a.user?.userName || "未登录"} · ${sub.planId || "未知套餐"} · CLI ${d.cliVersion}`;
+
+  $("conn").innerHTML = copyBox("Base URL", BASE, "c-base") + copyBox("API Key（本地不校验，任意值都可以）", KEY, "c-key")
+    + d.models.map((m, i) => copyBox(i ? "模型（快速版）" : "模型（默认）", m, "c-m" + i)).join("");
+  $("prompt").textContent =
+`请把 OpenAI 兼容接口配置为：
+base_url = ${BASE}
+api_key  = ${KEY}
+model    = ${d.models[0]}   （可选快速版：${d.models[1]}）
+接口：POST /chat/completions（支持 stream、tools/tool_calls、reasoning_content），GET /models。
+
+Python 示例：
+from openai import OpenAI
+client = OpenAI(base_url="${BASE}", api_key="${KEY}")
+r = client.chat.completions.create(model="${d.models[0]}", messages=[{"role": "user", "content": "你好"}])
+print(r.choices[0].message.content)
+
+环境变量写法：
+OPENAI_BASE_URL=${BASE}
+OPENAI_API_KEY=${KEY}`;
+
+  $("quota").innerHTML =
+    (w.fiveHour ? meter("5 小时窗口", "timer", w.fiveHour.used, w.fiveHour.cap, w.fiveHour.resetAt) : meter("5 小时窗口", "timer", 0, 0, 0, "无数据"))
+    + (w.weekly ? meter("每周额度", "calendar-days", w.weekly.used, w.weekly.cap, w.weekly.resetAt) : meter("每周额度", "calendar-days", 0, 0, 0, "无数据"))
+    + `<div class="card p-5">
+        <div class="text-sm text-stone-500 flex items-center gap-2"><i data-lucide="wallet" class="w-4 h-4"></i>本月套餐余额</div>
+        <div class="mt-2 text-2xl font-semibold">${usd(cr.credits?.monthlyCredits)}</div>
+        <div class="text-sm text-stone-500">本周期已消耗 ${usd(sm.totalCost)} · 共 ${sm.totalCount ?? 0} 次</div>
+        <div class="text-xs text-stone-400 mt-3">${sub.currentPeriodEnd ? "周期结束 " + new Date(sub.currentPeriodEnd).toLocaleDateString() + "（" + left(Date.parse(sub.currentPeriodEnd)) + "后）" : ""}</div>
+        <div class="text-xs text-stone-400">状态：${esc(sub.status || "-")} · 成功率 ${sm.successRate ?? "-"}%</div>
+      </div>`;
+
+  const t = d.totals;
+  const avgMs = d.calls.length ? d.calls.slice(0, 50).reduce((s, c) => s + c.ms, 0) / Math.min(50, d.calls.length) : 0;
+  $("stats").innerHTML =
+    stat("本地调用总数", t.n, "activity", `失败 ${t.fail} · 今天 ${t.today}`)
+    + stat("输入 token", fmt(t.in), "arrow-down-to-line", "本地累计")
+    + stat("输出 token", fmt(t.out), "arrow-up-from-line", "本地累计")
+    + stat("缓存命中率", t.in ? (t.cached / t.in * 100).toFixed(1) + "%" : "-", "database-zap", fmt(t.cached) + " token 命中")
+    + stat("平均耗时", (avgMs / 1000).toFixed(2) + "s", "gauge", "最近 50 次");
+
+  const buckets = d.buckets;
+  const max = Math.max(1, ...buckets);
+  $("chart").innerHTML = buckets.map((v, i) => `<div class="flex-1 bg-amber-600/80 rounded-t" style="height:${Math.max(2, v / max * 100)}%" title="${24 - i} 小时前起：${fmt(v)} token"></div>`).join("");
+
+  $("rows").innerHTML = d.calls.map((c) => `<tr class="border-b border-stone-100">
+    <td class="py-1.5 pr-3 whitespace-nowrap text-stone-500">${new Date(c.t).toLocaleString()}</td>
+    <td class="pr-3 mono">${esc(c.model)}${c.stream ? ' <span class="text-xs text-stone-400">stream</span>' : ""}</td>
+    <td class="pr-3"><span class="px-1.5 py-0.5 rounded text-xs ${c.status === 200 ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-700"}">${c.status}</span></td>
+    <td class="pr-3 text-right">${(c.ms / 1000).toFixed(2)}s</td>
+    <td class="pr-3 text-right">${fmt(c.in)}</td>
+    <td class="pr-3 text-right text-stone-500">${fmt(c.cached)}</td>
+    <td class="pr-3 text-right">${fmt(c.out)}</td>
+    <td class="text-xs text-red-600 max-w-xs truncate" title="${esc(c.error)}">${esc(c.error)}</td></tr>`).join("")
+    || `<tr><td colspan="8" class="py-6 text-center text-stone-400">暂无调用</td></tr>`;
+  lucide.createIcons();
+}
+
+document.addEventListener("click", (e) => {
+  const b = e.target.closest(".copy"); if (!b) return;
+  navigator.clipboard.writeText($(b.dataset.target).textContent);
+  const old = b.innerHTML; b.innerHTML = '<i data-lucide="check" class="w-4 h-4"></i>'; lucide.createIcons();
+  setTimeout(() => { b.innerHTML = old; lucide.createIcons(); }, 1200);
+});
+load(); setInterval(load, 15000);
+</script>
+</body>
+</html>

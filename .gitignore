@@ -1,0 +1,8 @@
+data/
+docs/
+Temp/
+.pi/
+.env
+.env.*
+auth.json
+__pycache__/
